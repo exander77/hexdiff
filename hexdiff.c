@@ -33,13 +33,18 @@
 
 inline size_t min(size_t a, size_t b) { return a < b ? a : b; }
 inline size_t max(size_t a, size_t b) { return a > b ? a : b; }
-#define min3(x,y,z) min(min(x,y),z);
+inline size_t min3(size_t a, size_t b, size_t c) { return min(min(a,b),c); }
+inline size_t max3(size_t a, size_t b, size_t c) { return max(max(a,b),c); }
+inline size_t imin(size_t a, size_t b, int *index) { if (a < b) return  a; ++*index; return b; }
+inline size_t imax(size_t a, size_t b, int *index) { if (a > b) return  a; ++*index; return b; }
+inline size_t imin3(size_t a, size_t b, size_t c, int *index) { return imin(imin(a,b, index),c, index); }
+inline size_t imax3(size_t a, size_t b, size_t c, int *index) { return imax(imin(a,b, index),c, index); }
 
 // ANSI escape sequences
-static const char ansi_green[] = "\x1B""[32m";
-static const char ansi_red[] = "\x1B""[31m";
-static const char ansi_reset[] = "\x1B""[0m";
-static const char empty_str[] = "";
+static const char ansi_green[]  = "\x1B""[32m";
+static const char ansi_red[]    = "\x1B""[31m";
+static const char ansi_reset[]  = "\x1B""[0m";
+static const char empty_str[]   = "";
 
 typedef struct {
     FILE *file;
@@ -98,6 +103,7 @@ int fc_eof(fc_t* fc) {
 
 void fc_close(fc_t* fc) {
     fclose(fc->file);
+    free(fc->buf);
 }
 
 static int sigint_recv = 0;
@@ -115,18 +121,18 @@ static void show_help(char **argv, int verbose)
             argv[0]);
     if (verbose) {
         fprintf(stderr,
-               " -v      verbose\n"
-               " -a      print all lines\n"
-               " -d      dens output\n"
-               " -s      skip same lines\n"
-               " -h      show help\n"
-               " -n num  maximum number of bytes to compare\n"
-               " -c num  number of bytes (columns) (default = 16)\n"
-               " -C num  number of bytes (columns) for distance comparison (default = 256)\n"
-               " -w num  force terminal width\n"
-               " -B num  number of bytes for read buffer (default = 10240)\n"
-               " skip1   starting offset for file1\n"
-               " skip2   starting offset for file2\n");
+               " -v, --verbose                  verbose\n"
+               " -a, --all                      print all lines\n"
+               " -d, --dense                    dense output\n"
+               " -s, --nosame                   skip same lines\n"
+               " -h, --help                     show help\n"
+               " -n num, --length=num           maximum number of bytes to compare\n"
+               " -c num, --bytes-width=num      number of bytes (columns) (default = 16)\n"
+               " -C num, --bytes-search=num     number of bytes (columns) for search (default = 256)\n"
+               " -w num, --width=num            force terminal width\n"
+               " -B num, --buffer-size=num      number of bytes for read buffer (default = 10240)\n"
+               " skip1                          starting offset for file1\n"
+               " skip2                          starting offset for file2\n");
     }
     exit(EXIT_FAILURE);
 }
@@ -134,45 +140,33 @@ static void show_help(char **argv, int verbose)
 static void printicize(char * buf, size_t n)
 {
     // Convert non-ASCII printable values to '.'
-    for (int i = 0; i < n; i++) {
-        if ((buf[i] < 0x20) || (buf[i] > 0x7e)) {
-            buf[i] = '.';
-        }
+    for (int i=0; i<n; ++i) if (buf[i]<0x20 || buf[i]>0x7e) buf[i] = '.';
+}
+
+static void print_same_side(char *buf, size_t n, size_t skip, size_t read, size_t cnt, int flag_dense)
+{
+    printf("%s0x%010zx  ", ansi_reset, skip + cnt);
+    for (int i=0;i<read;++i) {
+        printf("%02hhx", buf[i]);
+        if (!flag_dense) printf(" ");
     }
+    for (int i=read;i<n;++i) {
+        printf("  ");
+        if (!flag_dense) printf(" ");
+    }
+    printf(" ");
+    printicize(buf, n);
+    for (int i=0;i<read;++i) printf("%c", buf[i]);
+    printf("%*c", (int)(n-read), ' ');
 }
 
 static void print_same(char *buf1, char *buf2, size_t n, size_t skip1, size_t skip2, size_t read1, size_t read2, size_t cnt, int flag_dense)
 {
     // Print the left side
-    printf("%s0x%010zx  ", ansi_reset, skip1 + cnt);
-    for (int i=0;i<read1;++i) {
-        printf("%02hhx", buf1[i]);
-        if (!flag_dense) printf(" ");
-    }
-    for (int i=read1;i<n;++i) {
-        printf("  ");
-        if (!flag_dense) printf(" ");
-    }
-    printf(" ");
-    printicize(buf1, n);
-    for (int i=0;i<read1;++i) printf("%c", buf1[i]);
-    for (int i=read1;i<n;++i) printf(" ");
+    print_same_side(buf1, n, skip1, read1, cnt, flag_dense);
     printf("    ");
-
     // Print the right side
-    printf("0x%010zx  ", skip2 + cnt);
-    for (int i=0;i<read2;++i) {
-        printf("%02hhx", buf2[i]);
-        if (!flag_dense) printf(" ");
-    }
-    for (int i=read2;i<n;++i) {
-        printf("  ");
-        if (!flag_dense) printf(" ");
-    }
-    printf(" ");
-    printicize(buf2, n);
-    for (int i=0;i<read2;++i) printf("%c", buf2[i]);
-    for (int i=read2;i<n;++i) printf(" ");
+    print_same_side(buf2, n, skip2, read2, cnt, flag_dense);
 }
 
 static void print_diff(char *buf1, char *buf2, size_t n, size_t skip1, size_t skip2, size_t read1, size_t read2, size_t cnt, int flag_dense)
@@ -218,7 +212,7 @@ static void print_diff(char *buf1, char *buf2, size_t n, size_t skip1, size_t sk
     printf(" ");
     printicize(buf1, n);
     for (int i=0;i<read1;++i) printf("%s%c", color[i], buf1[i]);
-    for (int i=read1;i<n;++i) printf(" ");
+    printf("%*c", (int)(n-read1), ' ');
     printf("    ");
 
     // Print the right side
@@ -234,7 +228,7 @@ static void print_diff(char *buf1, char *buf2, size_t n, size_t skip1, size_t sk
     printf(" ");
     printicize(buf2, n);
     for (int i=0;i<read2;++i) printf("%s%c", color[i], buf2[i]);
-    for (int i=read2;i<n;++i) printf(" ");
+    printf("%*c", (int)(n-read2), ' ');
     printf("%s", ansi_reset);
 }
 
@@ -248,27 +242,27 @@ int main(int argc, char **argv)
 {
     int opt, buffer_size = 10240, bytes_width = 16, bytes_search = 256, chars_width = 0;
     static int flag_verbose = 0, flag_all = 0, flag_dense = 0, flag_nosame = 0;
-    size_t max_len = 0, cnt, eq_run;
+    size_t max_len = 0, cnt = 0, eq_run = 0;
     char *fname1, *fname2;
     char *buf1, *buf2;
     size_t skip1, skip2;
     size_t read1, read2;
     struct sigaction sigint_action;
-    struct winsize w;
+    struct winsize ws;
     fc_t fc1, fc2;
 
-    ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
-    chars_width = w.ws_col;
+    ioctl(STDIN_FILENO, TIOCGWINSZ, &ws);
+    chars_width = ws.ws_col;
 
     // Parse the input arguments
     static struct option long_options[] =
         {
-          {"verbose",       no_argument,       &flag_verbose,   'v'},
-          {"all",           no_argument,       &flag_all,       'a'},
-          {"dense",         no_argument,       &flag_dense,     'd'},
-          {"nosame",        no_argument,       &flag_nosame,    's'},
+          {"verbose",       no_argument,       NULL, 'v'},
+          {"all",           no_argument,       NULL, 'a'},
+          {"dense",         no_argument,       NULL, 'd'},
+          {"nosame",        no_argument,       NULL, 's'},
           {"length",        required_argument, NULL, 'n'},
-          {"chars-width",   required_argument, NULL, 'w'},
+          {"width",         required_argument, NULL, 'w'},
           {"bytes-width",   required_argument, NULL, 'c'},
           {"bytes-search",  required_argument, NULL, 'C'},
           {"buffer-size",   required_argument, NULL, 'B'},
@@ -281,10 +275,16 @@ int main(int argc, char **argv)
     while ((opt = getopt_long(argc, argv, "vadsn:w:c:C:B:h", long_options, &option_index)) != -1) {
         switch (opt) {
         case 'v':
+            flag_verbose = 1;
+            break;
         case 'a':
+            flag_all = 1;
+            break;
         case 'd':
+            flag_dense = 1;
+            break;
         case 's':
-            if (long_options[option_index].flag != NULL) *long_options[option_index].flag = 1;
+            flag_nosame = 1;
             break;
         case 'h':
             show_help(argv, 1);
@@ -339,25 +339,22 @@ int main(int argc, char **argv)
     sigint_action.sa_handler = sigint_handler;
     sigaction(SIGINT, &sigint_action, NULL);
 
-    cnt = 0;
-    eq_run = 0;
-
     while ((cnt < max_len || !max_len) && !sigint_recv) {
-        read1 = min(bytes_width, fc_read(&fc1, &buf1, bytes_search, bytes_width));
-        read2 = min(bytes_width, fc_read(&fc2, &buf2, bytes_search, bytes_width));
-        int readcmp = min(read1, read2);
+        read1 = min(bytes_search, fc_read(&fc1, &buf1, bytes_search, bytes_width));
+        read2 = min(bytes_search, fc_read(&fc2, &buf2, bytes_search, bytes_width));
+        int read1p = min(bytes_width, read1);
+        int read2p = min(bytes_width, read2);
+        int readcmp = min(read1p, read2p);
         if (!readcmp) break;
 
-        //printf("%zu %zu\n", read1, read2);
         if (!memcmp(buf1, buf2, readcmp)) {
             if ((!flag_nosame && !eq_run) || flag_all) {
-                print_same(buf1, buf2, bytes_width, skip1, skip2, read1, read2, cnt, flag_dense);
+                print_same(buf1, buf2, bytes_width, skip1, skip2, read1p, read2p, cnt, flag_dense);
                 printf("\n");
             } else if (eq_run == 1) printf("...\n");
             eq_run++;
         } else {
-            print_diff(buf1, buf2, bytes_width, skip1, skip2, read1, read2, cnt, flag_dense);
-            //printf(" %d", l);
+            print_diff(buf1, buf2, bytes_width, skip1, skip2, read1p, read2p, cnt, flag_dense);
             printf("\n");
             eq_run = 0;
         }
