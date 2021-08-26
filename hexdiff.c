@@ -32,13 +32,6 @@
 #define BUFFER_SIZE 256
 
 inline size_t min(size_t a, size_t b) { return a < b ? a : b; }
-inline size_t max(size_t a, size_t b) { return a > b ? a : b; }
-inline size_t min3(size_t a, size_t b, size_t c) { return min(min(a,b),c); }
-inline size_t max3(size_t a, size_t b, size_t c) { return max(max(a,b),c); }
-inline size_t imin(size_t a, size_t b, int *index) { if (a < b) return  a; ++*index; return b; }
-inline size_t imax(size_t a, size_t b, int *index) { if (a > b) return  a; ++*index; return b; }
-inline size_t imin3(size_t a, size_t b, size_t c, int *index) { return imin(imin(a,b, index),c, index); }
-inline size_t imax3(size_t a, size_t b, size_t c, int *index) { return imax(imin(a,b, index),c, index); }
 
 // ANSI escape sequences
 static const char ansi_green[]  = "\x1B""[32m";
@@ -54,6 +47,7 @@ typedef struct {
     char *end;
     int eof;
     size_t size;
+    size_t pos;
 } fc_t;
 
 void fc_open(fc_t* fc, char* name, size_t size) {
@@ -63,6 +57,7 @@ void fc_open(fc_t* fc, char* name, size_t size) {
         exit(EXIT_FAILURE);
     }
     fc->size = size;
+    fc->pos = 0;
     if ((fc->buf = (char *)malloc(sizeof(char)*size)) == NULL) {
         fprintf(stderr, "malloc: %zu: %s\n", size, strerror(errno));
         exit(EXIT_FAILURE);
@@ -72,16 +67,16 @@ void fc_open(fc_t* fc, char* name, size_t size) {
     fc->eof = 0;
 }
 
-void fc_skip(fc_t* fc, size_t size) {
+void fc_forcemove(fc_t* fc, size_t size) {
     if (size && fseeko(fc->file, size, 0) != 0) {
         fprintf(stderr, "fseek to 0x%zx in %s: %s\n", size, fc->name, strerror(errno));
         exit(EXIT_FAILURE);
     }
+    fc->pos = size;
 }
 
-size_t fc_read(fc_t* fc, char** target, size_t size, size_t move) {
-    size_t used = fc->end - fc->cur;
-   
+size_t fc_read(fc_t* fc, char** target, size_t size) {
+    size_t used = fc->cur > fc->end ? 0 : fc->end - fc->cur;
     if (used < size && !fc->eof) {
         memmove(fc->buf, fc->cur, used);
         size_t free = fc->size - used;
@@ -93,12 +88,20 @@ size_t fc_read(fc_t* fc, char** target, size_t size, size_t move) {
     }
 
     *target = fc->cur;
-    fc->cur += min(move, used);
     return used;
 }
 
-int fc_eof(fc_t* fc) {
+inline size_t fc_move(fc_t* fc, size_t size) {
+    fc->pos += size;
+    fc->cur += size;
+}
+
+inline int fc_eof(fc_t* fc) {
     return fc->eof;
+}
+
+inline size_t fc_pos(fc_t* fc) {
+    return fc->pos;
 }
 
 void fc_close(fc_t* fc) {
@@ -117,7 +120,7 @@ static void show_help(char **argv, int verbose)
 {
     fprintf(stderr,
             "Usage: %s [-vadsnh] [-n num] [-c num] [-w num] [-B num]\n"
-            "       file1 file2 [skip1 [skip2]]\n",
+            "       file1 file2 [pos1 [pos2]]\n",
             argv[0]);
     if (verbose) {
         fprintf(stderr,
@@ -131,8 +134,8 @@ static void show_help(char **argv, int verbose)
                " -C num, --bytes-search=num     number of bytes (columns) for search (default = 256)\n"
                " -w num, --width=num            force terminal width\n"
                " -B num, --buffer-size=num      number of bytes for read buffer (default = 10240)\n"
-               " skip1                          starting offset for file1\n"
-               " skip2                          starting offset for file2\n");
+               " pos1                          starting offset for file1\n"
+               " pos2                          starting offset for file2\n");
     }
     exit(EXIT_FAILURE);
 }
@@ -143,9 +146,9 @@ static void printicize(char * buf, size_t n)
     for (int i=0; i<n; ++i) if (buf[i]<0x20 || buf[i]>0x7e) buf[i] = '.';
 }
 
-static void print_same_side(char *buf, size_t n, size_t skip, size_t read, size_t cnt, int flag_dense)
+static void print_same_side(char *buf, size_t n, size_t skip, size_t read, int flag_dense)
 {
-    printf("%s0x%010zx  ", ansi_reset, skip + cnt);
+    printf("%s0x%010zx  ", ansi_reset, skip);
     for (int i=0;i<read;++i) {
         printf("%02hhx", buf[i]);
         if (!flag_dense) printf(" ");
@@ -157,19 +160,36 @@ static void print_same_side(char *buf, size_t n, size_t skip, size_t read, size_
     printf(" ");
     printicize(buf, n);
     for (int i=0;i<read;++i) printf("%c", buf[i]);
-    printf("%*c", (int)(n-read), ' ');
+    for (int i=read;i<n;++i) printf(" ");
 }
 
-static void print_same(char *buf1, char *buf2, size_t n, size_t skip1, size_t skip2, size_t read1, size_t read2, size_t cnt, int flag_dense)
+static void print_same(char *buf1, char *buf2, size_t n, size_t pos1, size_t pos2, size_t read1, size_t read2, int flag_dense)
 {
     // Print the left side
-    print_same_side(buf1, n, skip1, read1, cnt, flag_dense);
+    print_same_side(buf1, n, pos1, read1, flag_dense);
     printf("    ");
     // Print the right side
-    print_same_side(buf2, n, skip2, read2, cnt, flag_dense);
+    print_same_side(buf2, n, pos2, read2, flag_dense);
 }
 
-static void print_diff(char *buf1, char *buf2, size_t n, size_t skip1, size_t skip2, size_t read1, size_t read2, size_t cnt, int flag_dense)
+static void print_diff_side(char *buf, const char **color, size_t n, size_t skip, size_t read, int flag_dense)
+{
+    printf("%s0x%010zx  ", ansi_red, skip);
+    for (int i=0;i<read;++i) {
+        printf("%s%02hhx", color[i], buf[i]);
+        if (!flag_dense) printf(" ");
+    }
+    for (int i=read;i<n;++i) {
+        printf("  ");
+        if (!flag_dense) printf(" ");
+    }
+    printf(" ");
+    printicize(buf, n);
+    for (int i=0;i<read;++i) printf("%s%c", color[i], buf[i]);
+    for (int i=read;i<n;++i) printf(" ");
+}
+
+static void print_diff(char *buf1, char *buf2, size_t n, size_t pos1, size_t pos2, size_t read1, size_t read2, int flag_dense)
 {
     const char *color[BUFFER_SIZE];
     const char *color_last;
@@ -200,43 +220,17 @@ static void print_diff(char *buf1, char *buf2, size_t n, size_t skip1, size_t sk
     }
 
     // Print the left side
-    printf("%s0x%010zx  ", ansi_red, skip1 + cnt);
-    for (int i=0;i<read1;++i) {
-        printf("%s%02hhx", color[i], buf1[i]);
-        if (!flag_dense) printf(" ");
-    }
-    for (int i=read1;i<n;++i) {
-        printf("  ");
-        if (!flag_dense) printf(" ");
-    }
-    printf(" ");
-    printicize(buf1, n);
-    for (int i=0;i<read1;++i) printf("%s%c", color[i], buf1[i]);
-    printf("%*c", (int)(n-read1), ' ');
+    print_diff_side(buf1, color, n, pos1, read1, flag_dense);
     printf("    ");
-
     // Print the right side
-    printf("%s0x%010zx  ", ansi_red, skip2 + cnt);
-    for (int i=0;i<read2;++i) {
-        printf("%s%02hhx", color[i], buf2[i]);
-        if (!flag_dense) printf(" ");
-    }
-    for (int i=read2;i<n;++i) {
-        printf("  ");
-        if (!flag_dense) printf(" ");
-    }
-    printf(" ");
-    printicize(buf2, n);
-    for (int i=0;i<read2;++i) printf("%s%c", color[i], buf2[i]);
-    printf("%*c", (int)(n-read2), ' ');
+    print_diff_side(buf2, color, n, pos2, read2, flag_dense);
     printf("%s", ansi_reset);
 }
 
 int fit_bytes(int width, int flag_dense) {
-    return ((width/2*2) - (12+2+1)*2 - 3)/2/(3+!flag_dense);
+    return ((width/2*2) - (12+2+1)*2 - 3)/2/(3+!flag_dense); // TODO: wtf
 }
 
-}
 
 int main(int argc, char **argv)
 {
@@ -245,7 +239,7 @@ int main(int argc, char **argv)
     size_t max_len = 0, cnt = 0, eq_run = 0;
     char *fname1, *fname2;
     char *buf1, *buf2;
-    size_t skip1, skip2;
+    size_t pos1, pos2;
     size_t read1, read2;
     struct sigaction sigint_action;
     struct winsize ws;
@@ -322,8 +316,8 @@ int main(int argc, char **argv)
     if ((argc - optind) < 2) show_help(argv, 0);
     fname1 = argv[optind++];
     fname2 = argv[optind++];
-    skip1 = (optind < argc) ? strtoull(argv[optind++], NULL, 0) : 0;
-    skip2 = (optind < argc) ? strtoull(argv[optind++], NULL, 0) : 0;
+    pos1 = (optind < argc) ? strtoull(argv[optind++], NULL, 0) : 0;
+    pos2 = (optind < argc) ? strtoull(argv[optind++], NULL, 0) : 0;
     if (optind < argc) {
         //Leftover arguments
         for (int i = optind; i < argc; i++) fprintf (stderr, "%s: unexpected option %s\n", argv[0], argv[i]);
@@ -332,16 +326,16 @@ int main(int argc, char **argv)
 
     fc_open(&fc1, fname1, buffer_size);
     fc_open(&fc2, fname2, buffer_size);
-    fc_skip(&fc1, skip1);
-    fc_skip(&fc2, skip2);
+    fc_forcemove(&fc1, pos1);
+    fc_forcemove(&fc2, pos2);
 
     // Set up signal handler for SIGINT
     sigint_action.sa_handler = sigint_handler;
     sigaction(SIGINT, &sigint_action, NULL);
 
-    while ((cnt < max_len || !max_len) && !sigint_recv) {
-        read1 = min(bytes_search, fc_read(&fc1, &buf1, bytes_search, bytes_width));
-        read2 = min(bytes_search, fc_read(&fc2, &buf2, bytes_search, bytes_width));
+    while (((fc_pos(&fc1) < max_len && fc_pos(&fc2) < max_len) || !max_len) && !sigint_recv) {
+        read1 = min(bytes_search, fc_read(&fc1, &buf1, bytes_search));
+        read2 = min(bytes_search, fc_read(&fc2, &buf2, bytes_search));
         int read1p = min(bytes_width, read1);
         int read2p = min(bytes_width, read2);
         int readcmp = min(read1p, read2p);
@@ -349,17 +343,17 @@ int main(int argc, char **argv)
 
         if (!memcmp(buf1, buf2, readcmp)) {
             if ((!flag_nosame && !eq_run) || flag_all) {
-                print_same(buf1, buf2, bytes_width, skip1, skip2, read1p, read2p, cnt, flag_dense);
+                print_same(buf1, buf2, bytes_width, fc_pos(&fc1), fc_pos(&fc2), read1p, read2p, flag_dense);
                 printf("\n");
             } else if (eq_run == 1) printf("...\n");
             eq_run++;
         } else {
-            print_diff(buf1, buf2, bytes_width, skip1, skip2, read1p, read2p, cnt, flag_dense);
+            print_diff(buf1, buf2, bytes_width, fc_pos(&fc1), fc_pos(&fc2), read1p, read2p, flag_dense);
             printf("\n");
             eq_run = 0;
         }
-
-        cnt += bytes_width;
+        fc_move(&fc1, bytes_width);
+        fc_move(&fc2, bytes_width);
     }
 
     fc_close(&fc1);
